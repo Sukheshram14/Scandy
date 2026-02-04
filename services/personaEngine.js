@@ -47,7 +47,9 @@ Output ONLY the response string. No quotes, no JSON. just the text.
     // Convert history to LLM format
     const messages = [
         { role: "system", content: systemPrompt },
-        ...history.map(msg => ({ 
+        ...history
+            .filter(msg => msg.text) // Filter out null/empty messages (e.g., from Monitoring Mode)
+            .map(msg => ({ 
             role: msg.sender === 'scammer' ? 'user' : 'assistant', 
             content: msg.text 
         })),

@@ -12,7 +12,7 @@ const Session = require('./models/Session');
 const { encrypt, decrypt } = require('./services/encryption');
 
 // Connect to MongoDB
-connectDB();
+// connectDB() called in startServer
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -208,4 +208,15 @@ app.post('/api/chat', authenticate, async (req, res) => {
     }
 });
 
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// Start Server only after DB connection
+const startServer = async () => {
+    try {
+        await connectDB();
+        app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+    } catch (err) {
+        console.error("Failed to start server due to DB connection issue:", err.message);
+        process.exit(1);
+    }
+};
+
+startServer();
