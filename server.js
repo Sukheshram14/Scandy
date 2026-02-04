@@ -11,9 +11,31 @@ const { reportFinalResult } = require('./services/reportingService');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(cors());
-app.use(bodyParser.json());
+// Middleware (Enhanced for Debugging)
+app.use((req, res, next) => {
+    console.log(`\n--- [${new Date().toISOString()}] Incoming Request ---`);
+    console.log(`Method: ${req.method}`);
+    console.log(`URL: ${req.url}`);
+    console.log(`Headers:`, JSON.stringify(req.headers, null, 2));
+    next();
+});
+
+app.use(cors({
+    origin: '*', 
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'x-api-key', 'ngrok-skip-browser-warning']
+}));
+
+app.use((req, res, next) => {
+    bodyParser.json()(req, res, (err) => {
+        if (err) {
+            console.error("!!! JSON PARSE ERROR !!!", err.message);
+            return res.status(400).json({ status: "error", message: "Invalid JSON format", details: err.message });
+        }
+        console.log("Parsed Body:", JSON.stringify(req.body, null, 2));
+        next();
+    });
+});
 
 // Simple In-Memory Session Store
 const sessions = new Map();
@@ -32,7 +54,7 @@ const logToClients = (type, message) => {
     } catch(e) { console.error("SSE Error:", e); }
 };
 
-app.get('/', (req, res) => res.send('HoneyPot AI Backend is running.'));
+app.get('/', (req, res) => res.send('HoneyPot AI Backend is running. (Debug-Guvi Branch)'));
 app.get('/api/events', (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -139,30 +161,37 @@ app.post('/api/chat', authenticate, async (req, res) => {
         }
 
         // 5. Mandatory Final Result Callback
-        // Based on Section 12, we report if scam is detected. 
         if (session.scamDetected) {
              const totalMessages = (conversationHistory?.length || 0) + 1;
              const flatIntel = flattenIntelligence(session.extractedIntelligence);
 
-             reportFinalResult({
+             const reportPayload = {
                 sessionId: sessionId,
                 scamDetected: true,
                 totalMessagesExchanged: totalMessages,
                 extractedIntelligence: flatIntel,
                 agentNotes: `${session.metrics.reason} [Score: ${session.metrics.score}]`
-            }).catch(e => logToClients('error', `Reporting failed: ${e.message}`));
+            };
+
+            console.log("[Background] Reporting Final Result Payload:", JSON.stringify(reportPayload, null, 2));
+
+             reportFinalResult(reportPayload)
+                .then(result => console.log(`[Reporting Success] Session: ${sessionId}`))
+                .catch(e => console.error(`[Reporting Failure] Session: ${sessionId}, Error: ${e.message}`));
         }
 
         // 6. Response - STRICTLY matching Spec Section 8
+        console.log(`[Response] Sending Reply: "${replyText}"`);
         res.json({
             status: "success",
             reply: replyText 
         });
 
     } catch (error) {
+        console.error("!!! FATAL ROUTE ERROR !!!", error);
         logToClients('error', `Error processing request: ${error.message}`);
         res.status(500).json({ status: "error", message: "Internal server error" });
     }
 });
 
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server running (DEBUG MODE) on port ${PORT}`));
