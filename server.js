@@ -68,10 +68,21 @@ const authenticate = (req, res, next) => {
 // Apply Auth to specific routes
 app.post('/api/chat', authenticate, async (req, res) => {
     try {
-        const { message, conversationHistory, sessionId, metadata } = req.body;
-        if (!sessionId || !message) return res.status(400).json({ status: "error", message: "Invalid payload" });
+        let { message, conversationHistory, sessionId, metadata } = req.body;
+        
+        // Robustness: Handle sessionId missing
+        sessionId = sessionId || `anon-${Date.now()}`;
 
-        logToClients('info', `[${sessionId}] Incoming: "${message.text ? message.text.substring(0, 50) : 'No text'}..."`);
+        // Robustness: Handle message being a string (Fixes INVALID_REQUEST_BODY in some tools)
+        if (typeof message === 'string') {
+            message = { text: message, sender: 'scammer', timestamp: new Date().toISOString() };
+        }
+
+        if (!sessionId || !message || !message.text) {
+             return res.status(400).json({ status: "error", message: "Invalid payload: message and sessionId are required" });
+        }
+
+        logToClients('info', `[${sessionId}] Incoming: "${message.text.substring(0, 50)}..."`);
 
         // 1. Session Init
         let session = sessions.get(sessionId);
@@ -132,6 +143,11 @@ app.post('/api/chat', authenticate, async (req, res) => {
                 mode,
                 scamConfidence: session.metrics.score
             });
+
+            // Clean formatting: Strip any AI-generated quotes
+            if (replyText) {
+                replyText = replyText.replace(/^["']|["']$/g, '').trim();
+            }
 
             logToClients('info', `[${sessionId}] Reply: "${replyText}"`);
         } else {
