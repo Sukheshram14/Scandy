@@ -8,6 +8,7 @@ const connectDB = async () => {
             return;
         }
 
+        mongoose.set('bufferCommands', false);
         await mongoose.connect(uri);
         console.log('MongoDB Connected successfully');
     } catch (error) {

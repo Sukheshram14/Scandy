@@ -79,12 +79,29 @@ const authenticate = (req, res, next) => {
 // Apply Auth to specific routes
 app.post('/api/chat', authenticate, async (req, res) => {
     try {
-        const { message, conversationHistory, sessionId, metadata } = req.body;
-        if (!sessionId || !message) return res.status(400).json({ status: "error", message: "Invalid payload" });
+        // 0. Check DB Connectivity (Avoid Buffering Timeout)
+        const mongoose = require('mongoose');
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ status: "error", message: "Database not connected" });
+        }
 
-        logToClients('info', `[${sessionId}] Incoming: "${message.text ? message.text.substring(0, 50) : 'No text'}..."`);
+        // 1. Robust Payload Extraction
+        let { message, conversationHistory, sessionId, metadata } = req.body;
+        
+        // Handle cases where message is a string or missing
+        if (typeof message === 'string') {
+            message = { text: message, sender: 'scammer', timestamp: new Date().toISOString() };
+        }
+        
+        // Essential field fallbacks
+        sessionId = sessionId || `session-${Date.now()}`;
+        if (!message || !message.text) {
+             return res.status(400).json({ status: "error", message: "Missing message text" });
+        }
 
-        // 1. Session Retrieval (MongoDB)
+        logToClients('info', `[${sessionId}] Incoming: "${message.text.substring(0, 50)}..."`);
+        
+        // 2. Session Retrieval (MongoDB)
         let sessionData = await Session.findOne({ sessionId });
         
         if (!sessionData) {
