@@ -7,6 +7,12 @@ const { detectScam } = require('./services/scamDetector');
 const { generateResponse } = require('./services/personaEngine');
 const { extractIntelligence, aggregateIntelligence } = require('./services/intelligenceExtractor');
 const { reportFinalResult } = require('./services/reportingService');
+const { connectDB } = require('./services/db');
+const Session = require('./models/Session');
+const { encrypt, decrypt } = require('./services/encryption');
+
+// Connect to MongoDB
+connectDB();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,6 +20,11 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(cors());
 app.use(bodyParser.json());
+
+app.use((req, res, next) => {
+    console.log(`[HTTP] ${req.method} ${req.url}`);
+    next();
+});
 
 // Simple In-Memory Session Store
 const sessions = new Map();
@@ -73,24 +84,40 @@ app.post('/api/chat', authenticate, async (req, res) => {
 
         logToClients('info', `[${sessionId}] Incoming: "${message.text ? message.text.substring(0, 50) : 'No text'}..."`);
 
-        // 1. Session Init
-        let session = sessions.get(sessionId);
-        if (!session) {
-            session = {
+        // 1. Session Retrieval (MongoDB)
+        let sessionData = await Session.findOne({ sessionId });
+        
+        if (!sessionData) {
+            sessionData = new Session({
                 sessionId,
                 scamDetected: false,
                 metrics: { score: 0, reason: "" },
-                extractedIntelligence: { // regex based
-                    bank_accounts: [], upi_ids: [], urls: [], phones: [], suspiciousKeywords: []
+                extractedIntelligence: {
+                    bankAccounts: [], upiIds: [], phishingLinks: [], phoneNumbers: [], suspiciousKeywords: []
                 },
-                llmExtractions: {} // store deep extractions
-            };
-            sessions.set(sessionId, session);
+                conversationHistory: conversationHistory || []
+            });
+        } else {
+            // Decrypt for application use
+            sessionData.decryptData();
+            // Update history from request if provided
+            if (conversationHistory) {
+                sessionData.conversationHistory = conversationHistory;
+            }
         }
 
         // 2. Regex Extraction (Fast Pass)
         const regexIntel = extractIntelligence(message.text);
-        session.extractedIntelligence = aggregateIntelligence(session.extractedIntelligence, regexIntel);
+        
+        // Map regex results back to DB format
+        const currentIntel = flattenIntelligence(regexIntel);
+        
+        // Append new intel to sessionData
+        sessionData.extractedIntelligence.bankAccounts = [...new Set([...sessionData.extractedIntelligence.bankAccounts, ...currentIntel.bankAccounts])];
+        sessionData.extractedIntelligence.upiIds = [...new Set([...sessionData.extractedIntelligence.upiIds, ...currentIntel.upiIds])];
+        sessionData.extractedIntelligence.phishingLinks = [...new Set([...sessionData.extractedIntelligence.phishingLinks, ...currentIntel.phishingLinks])];
+        sessionData.extractedIntelligence.phoneNumbers = [...new Set([...sessionData.extractedIntelligence.phoneNumbers, ...currentIntel.phoneNumbers])];
+        sessionData.extractedIntelligence.suspiciousKeywords = [...new Set([...sessionData.extractedIntelligence.suspiciousKeywords, ...currentIntel.suspiciousKeywords])];
 
         // Log extraction details
         const foundKeywords = regexIntel.suspiciousKeywords.map(k => k.raw).join(', ');
@@ -99,59 +126,75 @@ app.post('/api/chat', authenticate, async (req, res) => {
         }
 
         // 3. Deep Analysis (LLM - Scoring & Decision)
-        const detailedAnalysis = await detectScam(message.text, conversationHistory || []);
+        const detailedAnalysis = await detectScam(message.text, sessionData.conversationHistory);
         
         // Log detailed decision
         logToClients('info', `[${sessionId}] Analysis: Score=${detailedAnalysis.maliciousness_score}, Decision=${detailedAnalysis.decision}`);
         
         // Update Session State Logic based on rules
         if (detailedAnalysis.decision === 'activate' || detailedAnalysis.maliciousness_score >= 0.8) {
-             if (!session.scamDetected) {
-                 session.scamDetected = true;
+             if (!sessionData.scamDetected) {
+                 sessionData.scamDetected = true;
                  logToClients('alert', `[${sessionId}] HONEYPOT ACTIVATED! (Score: ${detailedAnalysis.maliciousness_score})`);
              }
         }
         
         // Update metrics
-        session.metrics.score = detailedAnalysis.maliciousness_score;
-        session.metrics.reason = detailedAnalysis.decision_reasons?.[0] || "Detected by system";
+        sessionData.metrics.score = detailedAnalysis.maliciousness_score;
+        sessionData.metrics.reason = detailedAnalysis.decision_reasons?.[0] || "Detected by system";
 
         // 4. Generate Response (Persona Logic)
         let replyText = null;
         let mode = 'Monitoring Mode';
 
-        if (session.scamDetected) {
+        if (sessionData.scamDetected) {
             mode = 'Honeypot Mode';
-            const flatIntel = flattenIntelligence(session.extractedIntelligence);
             
             replyText = await generateResponse({
                 message,
-                history: conversationHistory || [],
-                extractedIntelligence: flatIntel,
+                history: sessionData.conversationHistory,
+                extractedIntelligence: sessionData.extractedIntelligence,
                 metadata,
                 mode,
-                scamConfidence: session.metrics.score
+                scamConfidence: sessionData.metrics.score
             });
 
             logToClients('info', `[${sessionId}] Reply: "${replyText}"`);
         } else {
-            logToClients('info', `[${sessionId}] Monitoring Mode: No intervention (Score: ${session.metrics.score})`);
+            logToClients('info', `[${sessionId}] Monitoring Mode: No intervention (Score: ${sessionData.metrics.score})`);
         }
 
-        // 5. Mandatory Final Result Callback
-        // Based on Section 12, we report if scam is detected. 
-        if (session.scamDetected) {
-             const totalMessages = (conversationHistory?.length || 0) + 1;
-             const flatIntel = flattenIntelligence(session.extractedIntelligence);
+        // Add latest message to history
+        sessionData.conversationHistory.push({
+            sender: "scammer",
+            text: message.text,
+            timestamp: new Date()
+        });
+        if (replyText) {
+            sessionData.conversationHistory.push({
+                sender: "user",
+                text: replyText,
+                timestamp: new Date()
+            });
+        }
 
+        sessionData.agentNotes = `${sessionData.metrics.reason} [Score: ${sessionData.metrics.score}]`;
+        sessionData.lastInteraction = new Date();
+
+        // 5. Mandatory Final Result Callback
+        if (sessionData.scamDetected) {
              reportFinalResult({
                 sessionId: sessionId,
                 scamDetected: true,
-                totalMessagesExchanged: totalMessages,
-                extractedIntelligence: flatIntel,
-                agentNotes: `${session.metrics.reason} [Score: ${session.metrics.score}]`
+                totalMessagesExchanged: sessionData.conversationHistory.length,
+                extractedIntelligence: sessionData.extractedIntelligence,
+                agentNotes: sessionData.agentNotes
             }).catch(e => logToClients('error', `Reporting failed: ${e.message}`));
         }
+
+        // Save to MongoDB
+        console.log(`[DB] Final Save for session: ${sessionId}`);
+        await sessionData.save();
 
         // 6. Response - STRICTLY matching Spec Section 8
         res.json({

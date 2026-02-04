@@ -19,6 +19,7 @@
     "eventsource": "^4.1.0",
     "express": "^5.2.1",
     "groq-sdk": "^0.37.0",
-    "inquirer": "^8.2.5"
+    "inquirer": "^8.2.5",
+    "mongoose": "^9.1.5"
   }
 }
